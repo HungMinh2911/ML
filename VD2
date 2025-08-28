@@ -1,0 +1,918 @@
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+from tensorflow import keras
+import matplotlib.pyplot as plt
+import plotly.express as px
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+
+# Load và xử lý dữ liệu như cũ
+housing_data_dataset = pd.read_csv(r"C:\Users\PC\Downloads\HousingData.csv")
+training_data = housing_data_dataset.loc[:, ('MEDV','RM','LSTAT','NOX','DIS','CRIM')]
+
+print("Số lượng NA theo cột:\n", training_data.isna().sum())
+
+dataset = training_data.copy()
+dataset.loc[:, "LSTAT"] = dataset["LSTAT"].fillna(dataset["LSTAT"].mean())
+
+print("Ma trận tương quan:")
+print(dataset.corr(numeric_only=True))
+
+# ------------------- Classes và functions cải tiến -------------------
+class ExperimentSettings:
+    def __init__(self, learning_rate=0.001, number_epochs=20, batch_size=50, 
+                 input_features=None, hidden_layers=None, dropout_rate=0.0,
+                 validation_split=0.2):
+        self.learning_rate = learning_rate
+        self.number_epochs = number_epochs
+        self.batch_size = batch_size
+        self.input_features = input_features if input_features is not None else []
+        self.hidden_layers = hidden_layers if hidden_layers is not None else []
+        self.dropout_rate = dropout_rate
+        self.validation_split = validation_split
+
+def create_improved_model(settings: ExperimentSettings, metrics: list) -> keras.Model:
+    # Input layers cho từng feature
+    inputs = {name: keras.Input(shape=(1,), name=name) for name in settings.input_features}
+    
+    # Concatenate tất cả inputs
+    concatenated = keras.layers.Concatenate()(list(inputs.values()))
+    
+    # Normalization layer
+    x = keras.layers.BatchNormalization()(concatenated)
+    
+    # Hidden layers
+    for units in settings.hidden_layers:
+        x = keras.layers.Dense(units, activation='relu')(x)
+        if settings.dropout_rate > 0:
+            x = keras.layers.Dropout(settings.dropout_rate)(x)
+        x = keras.layers.BatchNormalization()(x)
+    
+    # Output layer
+    output = keras.layers.Dense(units=1)(x)
+    
+    model = keras.Model(inputs=inputs, outputs=output)
+    
+    # Sử dụng Adam optimizer thay vì RMSprop
+    model.compile(
+        optimizer=keras.optimizers.Adam(settings.learning_rate),
+        loss='mean_squared_error',
+        metrics=metrics
+    )
+    return model
+
+class Experiment:
+    def __init__(self, name, settings, model, epochs, metric_history, val_metric_history=None):
+        self.name = name
+        self.settings = settings
+        self.model = model
+        self.epochs = epochs
+        self.metric_history = metric_history
+        self.val_metric_history = val_metric_history
+
+def train_improved_model(experiment_name: str, model: keras.Model, dataset: pd.DataFrame, 
+                        label_name: str, settings: ExperimentSettings) -> Experiment:
+    # Chuẩn bị dữ liệu
+    features = {name: dataset[name].values for name in settings.input_features}
+    label = dataset[label_name].values
+    
+    # Early stopping callback
+    early_stopping = keras.callbacks.EarlyStopping(
+        monitor='val_loss',
+        patience=20,
+        restore_best_weights=True
+    )
+    
+    # Reduce learning rate callback
+    reduce_lr = keras.callbacks.ReduceLROnPlateau(
+        monitor='val_loss',
+        factor=0.5,
+        patience=10,
+        min_lr=1e-7
+    )
+    
+    history = model.fit(
+        x=features,
+        y=label,
+        batch_size=settings.batch_size,
+        epochs=settings.number_epochs,
+        validation_split=settings.validation_split,
+        callbacks=[early_stopping, reduce_lr],
+        verbose=1
+    )
+    
+    return Experiment(
+        name=experiment_name,
+        settings=settings,
+        model=model,
+        epochs=history.epoch,
+        metric_history=pd.DataFrame(history.history),
+    )
+
+def plot_improved_metrics(experiment, metrics):
+    """Vẽ biểu đồ metrics với validation"""
+    fig, axes = plt.subplots(1, len(metrics), figsize=(15, 5))
+    if len(metrics) == 1:
+        axes = [axes]
+    
+    for i, metric in enumerate(metrics):
+        if metric in experiment.metric_history.columns:
+            axes[i].plot(experiment.epochs, experiment.metric_history[metric], 
+                        label=f'Training {metric.upper()}', linewidth=2)
+            
+            val_metric = f'val_{metric}'
+            if val_metric in experiment.metric_history.columns:
+                axes[i].plot(experiment.epochs, experiment.metric_history[val_metric], 
+                            label=f'Validation {metric.upper()}', linewidth=2)
+            
+            axes[i].set_xlabel('Epoch')
+            axes[i].set_ylabel('Value')
+            axes[i].set_title(f'{experiment.name} - {metric.upper()}')
+            axes[i].legend()
+            axes[i].grid(True)
+    
+    plt.tight_layout()
+    plt.show()
+
+def plot_improved_predictions(experiment, dataset, target_column):
+    """Vẽ biểu đồ predictions vs actual cải tiến"""
+    # Lấy mẫu dữ liệu
+    sample_data = dataset.sample(n=min(500, len(dataset)), random_state=42)
+    
+    # Dự đoán
+    features = {name: sample_data[name].values for name in experiment.settings.input_features}
+    predictions = experiment.model.predict(features)
+    actual = sample_data[target_column].values
+    
+    # Tính toán metrics
+    mse = np.mean((actual - predictions.flatten())**2)
+    rmse = np.sqrt(mse)
+    mae = np.mean(np.abs(actual - predictions.flatten()))
+    
+    # Vẽ biểu đồ
+    plt.figure(figsize=(12, 5))
+    
+    # Subplot 1: Predictions vs Actual
+    plt.subplot(1, 2, 1)
+    plt.scatter(actual, predictions.flatten(), alpha=0.6, s=30)
+    
+    # Đường perfect prediction
+    min_val, max_val = min(actual.min(), predictions.min()), max(actual.max(), predictions.max())
+    plt.plot([min_val, max_val], [min_val, max_val], 'r--', label='Perfect Prediction', linewidth=2)
+    
+    plt.xlabel(f'Actual {target_column}')
+    plt.ylabel(f'Predicted {target_column}')
+    plt.title(f'{experiment.name}\nRMSE: {rmse:.2f}, MAE: {mae:.2f}')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    # Subplot 2: Residuals
+    plt.subplot(1, 2, 2)
+    residuals = actual - predictions.flatten()
+    plt.scatter(predictions.flatten(), residuals, alpha=0.6, s=30)
+    plt.axhline(y=0, color='r', linestyle='--', linewidth=2)
+    plt.xlabel(f'Predicted {target_column}')
+    plt.ylabel('Residuals')
+    plt.title('Residual Plot')
+    plt.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.show()
+
+class ImprovedMLEdu:
+    class results:
+        plot_experiment_metrics = staticmethod(plot_improved_metrics)
+        plot_model_predictions = staticmethod(plot_improved_predictions)
+
+# ------------------- Thử nghiệm các mô hình khác nhau -------------------
+
+# Experiment 1: Mô hình đơn giản (như cũ)
+print("=== EXPERIMENT 1: Mô hình đơn giản (1 feature) ===")
+settings_1 = ExperimentSettings(
+    learning_rate=0.01,  # Giảm learning rate
+    number_epochs=200,
+    batch_size=32,       # Giảm batch size
+    input_features=['LSTAT']
+)
+metrics = [keras.metrics.RootMeanSquaredError(name='rmse')]
+model_1 = create_improved_model(settings_1, metrics)
+experiment_1 = train_improved_model('Simple Model (1 feature)', model_1, dataset, 'MEDV', settings_1)
+
+# Experiment 2: Nhiều features
+print("\n=== EXPERIMENT 2: Mô hình nhiều features ===")
+settings_2 = ExperimentSettings(
+    learning_rate=0.01,
+    number_epochs=300,
+    batch_size=32,
+    input_features=['LSTAT', 'RM', 'NOX', 'DIS', 'CRIM'],  # Dùng nhiều features
+    hidden_layers=[64, 32],  # Thêm hidden layers
+    dropout_rate=0.2         # Thêm dropout để tránh overfitting
+)
+model_2 = create_improved_model(settings_2, metrics)
+experiment_2 = train_improved_model('Multi-feature Model', model_2, dataset, 'MEDV', settings_2)
+
+# Experiment 3: Mô hình phức tạp hơn
+print("\n=== EXPERIMENT 3: Mô hình phức tạp ===")
+settings_3 = ExperimentSettings(
+    learning_rate=0.005,
+    number_epochs=400,
+    batch_size=16,
+    input_features=['LSTAT', 'RM', 'NOX', 'DIS', 'CRIM'],
+    hidden_layers=[128, 64, 32, 16],  # Nhiều layers hơn
+    dropout_rate=0.3
+)
+model_3 = create_improved_model(settings_3, metrics)
+experiment_3 = train_improved_model('Complex Model', model_3, dataset, 'MEDV', settings_3)
+
+# ------------------- So sánh kết quả -------------------
+ml_edu = ImprovedMLEdu()
+
+print("\n=== KẾT QUẢ EXPERIMENT 1 ===")
+ml_edu.results.plot_experiment_metrics(experiment_1, ['rmse'])
+ml_edu.results.plot_model_predictions(experiment_1, dataset, 'MEDV')
+
+print("\n=== KẾT QUẢ EXPERIMENT 2 ===")
+ml_edu.results.plot_experiment_metrics(experiment_2, ['rmse'])
+ml_edu.results.plot_model_predictions(experiment_2, dataset, 'MEDV')
+
+print("\n=== KẾT QUẢ EXPERIMENT 3 ===")
+ml_edu.results.plot_experiment_metrics(experiment_3, ['rmse'])
+ml_edu.results.plot_model_predictions(experiment_3, dataset, 'MEDV')
+
+# So sánh RMSE cuối cùng
+print("\n=== SO SÁNH RMSE CUỐI CÙNG ===")
+final_rmse_1 = experiment_1.metric_history['val_rmse'].iloc[-1]
+final_rmse_2 = experiment_2.metric_history['val_rmse'].iloc[-1]
+final_rmse_3 = experiment_3.metric_history['val_rmse'].iloc[-1]
+
+print(f"Experiment 1 (1 feature): RMSE = {final_rmse_1:.3f}")
+print(f"Experiment 2 (5 features): RMSE = {final_rmse_2:.3f}")
+print(f"Experiment 3 (Complex): RMSE = {final_rmse_3:.3f}")
+
+best_experiment = min([
+    (final_rmse_1, "Experiment 1"),
+    (final_rmse_2, "Experiment 2"), 
+    (final_rmse_3, "Experiment 3")
+])
+print(f"\nMô hình tốt nhất: {best_experiment[1]} với RMSE = {best_experiment[0]:.3f}")
+
+# ================= CHỨC NĂNG DỰ ĐOÁN GIÁ NHÀ (STYLE MỚI) =================
+
+def format_currency(value):
+    """Format giá trị thành dạng tiền tệ"""
+    return f"${value:.2f}k"
+
+def format_feature_value(feature_name, value):
+    """Format giá trị feature cho dễ đọc"""
+    format_rules = {
+        'LSTAT': f"{value:.1f}%",
+        'RM': f"{value:.1f} rooms", 
+        'NOX': f"{value:.3f} ppm",
+        'DIS': f"{value:.2f} miles",
+        'CRIM': f"{value:.2f}/1000"
+    }
+    return format_rules.get(feature_name, f"{value:.2f}")
+
+def build_housing_batch(df, batch_size):
+    """Tạo batch ngẫu nhiên từ housing dataset"""
+    batch = df.sample(n=batch_size).copy()
+    batch.set_index(np.arange(batch_size), inplace=True)
+    return batch
+
+def predict_housing_prices(model, df, features, label, batch_size=20):
+    """
+    Dự đoán giá nhà cho một batch và so sánh với giá thực tế
+    
+    Args:
+        model: Mô hình Keras đã train
+        df: Housing dataset  
+        features: List các feature names
+        label: Tên cột target (MEDV)
+        batch_size: Số mẫu để test
+    
+    Returns:
+        pd.DataFrame: Kết quả dự đoán với format đẹp
+    """
+    batch = build_housing_batch(df, batch_size)
+    
+    # Dự đoán bằng model
+    predicted_values = model.predict_on_batch(
+        x={name: batch[name].values for name in features}
+    )
+    
+    # Tạo dictionary chứa kết quả
+    data = {
+        "PREDICTED_PRICE": [], 
+        "ACTUAL_PRICE": [], 
+        "L1_ERROR": [],
+        "L1_ERROR_PCT": []
+    }
+    
+    # Thêm các cột feature vào data
+    for feature in features:
+        data[feature] = []
+    
+    # Điền dữ liệu cho từng sample
+    for i in range(batch_size):
+        predicted = predicted_values[i][0]
+        actual = batch.at[i, label]
+        l1_error = abs(actual - predicted)
+        error_pct = (l1_error / actual) * 100
+        
+        data["PREDICTED_PRICE"].append(format_currency(predicted))
+        data["ACTUAL_PRICE"].append(format_currency(actual))
+        data["L1_ERROR"].append(format_currency(l1_error))
+        data["L1_ERROR_PCT"].append(f"{error_pct:.1f}%")
+        
+        # Thêm giá trị các features
+        for feature in features:
+            data[feature].append(format_feature_value(feature, batch.at[i, feature]))
+    
+    output_df = pd.DataFrame(data)
+    return output_df
+
+def show_housing_predictions(output_df, model_name="Housing Model"):
+    """Hiển thị kết quả dự đoán với format đẹp"""
+    header = "=" * 100
+    banner = header + "\n" + "|" + f"🏠 {model_name.upper()} - PRICE PREDICTIONS 🏠".center(98) + "|" + "\n" + header
+    print(banner)
+    
+    # Hiển thị DataFrame với format đẹp
+    pd.set_option('display.max_columns', None)
+    pd.set_option('display.width', None) 
+    pd.set_option('display.max_colwidth', 15)
+    
+    print(output_df.to_string(index=True))
+    
+    # Thống kê tổng quan
+    print("\n" + "-" * 100)
+    print("📊 THỐNG KÊ TỔNG QUAN:")
+    
+    # Parse lại giá trị từ string để tính toán
+    predicted_vals = [float(x.replace('
+
+# ================= VÍ DỤ NGẮN GỌN =================
+
+# Chọn mô hình tốt nhất
+experiments = [experiment_1, experiment_2, experiment_3] 
+rmse_scores = [
+    experiment_1.metric_history['val_rmse'].iloc[-1] if 'val_rmse' in experiment_1.metric_history else experiment_1.metric_history['rmse'].iloc[-1],
+    experiment_2.metric_history['val_rmse'].iloc[-1] if 'val_rmse' in experiment_2.metric_history else experiment_2.metric_history['rmse'].iloc[-1], 
+    experiment_3.metric_history['val_rmse'].iloc[-1] if 'val_rmse' in experiment_3.metric_history else experiment_3.metric_history['rmse'].iloc[-1]
+]
+best_idx = np.argmin(rmse_scores)
+best_model = experiments[best_idx]
+
+print(f"\n🏆 Mô hình tốt nhất: {best_model.name} (RMSE: {rmse_scores[best_idx]:.3f})")
+
+# Ví dụ dự đoán batch
+predictions = predict_housing_prices(best_model.model, dataset, 
+                                   best_model.settings.input_features, 'MEDV', 8)
+show_housing_predictions(predictions, best_model.name)
+
+# Ví dụ dự đoán đơn
+if len(best_model.settings.input_features) > 1:
+    price = predict_single_house(best_model, LSTAT=8.5, RM=6.8, NOX=0.45, DIS=4.2, CRIM=2.1)
+else:
+    price = predict_single_house(best_model, LSTAT=12.5)
+
+print(f"💰 Single prediction: {format_currency(price)}")
+
+# Usage
+print(f"\n📝 Sử dụng:")
+print(f"predict_single_house(best_model, LSTAT=10, RM=6.5, ...)")
+print(f"predict_housing_prices(best_model.model, dataset, features, 'MEDV', 10)")
+, '').replace('k', '')) for x in output_df['PREDICTED_PRICE']]
+    actual_vals = [float(x.replace('
+
+def predict_with_examples():
+    """Dự đoán với các ví dụ cụ thể"""
+    print("\n" + "="*60)
+    print("           DỰ ĐOÁN GIÁ NHÀ VỚI CÁC THÔNG SỐ CỤ THỂ")
+    print("="*60)
+    
+    # Chọn mô hình tốt nhất
+    experiments = [experiment_1, experiment_2, experiment_3]
+    rmse_scores = [final_rmse_1, final_rmse_2, final_rmse_3]
+    best_idx = np.argmin(rmse_scores)
+    best_model = experiments[best_idx]
+    
+    print(f"Sử dụng {best_model.name} (RMSE: {rmse_scores[best_idx]:.3f})")
+    print("\nGiải thích các thông số:")
+    print("- LSTAT: % dân số thu nhập thấp (càng thấp càng tốt)")
+    print("- RM: Số phòng trung bình (càng nhiều càng tốt)")  
+    print("- NOX: Nồng độ NOx (càng thấp càng tốt)")
+    print("- DIS: Khoảng cách đến trung tâm việc làm (càng gần càng tốt)")
+    print("- CRIM: Tỷ lệ tội phạm (càng thấp càng tốt)")
+    
+    # Ví dụ 1: Nhà tốt
+    print("\n--- VÍ DỤ 1: Khu vực tốt ---")
+    if best_model.name != 'Simple Model (1 feature)':
+        example_1 = {
+            'LSTAT': 5.0,    # Thu nhập cao
+            'RM': 7.5,       # Nhiều phòng
+            'NOX': 0.4,      # Ô nhiễm thấp  
+            'DIS': 8.0,      # Gần trung tâm
+            'CRIM': 0.1      # Tỷ lệ tội phạm thấp
+        }
+        price_1 = predict_house_price(best_model, **example_1)
+        print("Thông số:")
+        for k, v in example_1.items():
+            print(f"  {k}: {v}")
+        print(f"→ Giá dự đoán: ${price_1:.1f}k")
+    else:
+        example_1 = {'LSTAT': 5.0}
+        price_1 = predict_house_price(best_model, **example_1)
+        print(f"LSTAT: {example_1['LSTAT']} → Giá dự đoán: ${price_1:.1f}k")
+    
+    # Ví dụ 2: Nhà trung bình
+    print("\n--- VÍ DỤ 2: Khu vực trung bình ---")
+    if best_model.name != 'Simple Model (1 feature)':
+        example_2 = {
+            'LSTAT': 12.0,   # Thu nhập trung bình
+            'RM': 6.0,       # Số phòng trung bình
+            'NOX': 0.55,     # Ô nhiễm trung bình
+            'DIS': 4.0,      # Khoảng cách trung bình
+            'CRIM': 5.0      # Tỷ lệ tội phạm trung bình
+        }
+        price_2 = predict_house_price(best_model, **example_2)
+        print("Thông số:")
+        for k, v in example_2.items():
+            print(f"  {k}: {v}")
+        print(f"→ Giá dự đoán: ${price_2:.1f}k")
+    else:
+        example_2 = {'LSTAT': 12.0}
+        price_2 = predict_house_price(best_model, **example_2)
+        print(f"LSTAT: {example_2['LSTAT']} → Giá dự đoán: ${price_2:.1f}k")
+    
+    # Ví dụ 3: Nhà kém
+    print("\n--- VÍ DỤ 3: Khu vực kém ---")
+    if best_model.name != 'Simple Model (1 feature)':
+        example_3 = {
+            'LSTAT': 25.0,   # Thu nhập thấp
+            'RM': 4.5,       # Ít phòng
+            'NOX': 0.8,      # Ô nhiễm cao
+            'DIS': 1.5,      # Xa trung tâm
+            'CRIM': 20.0     # Tỷ lệ tội phạm cao
+        }
+        price_3 = predict_house_price(best_model, **example_3)
+        print("Thông số:")
+        for k, v in example_3.items():
+            print(f"  {k}: {v}")
+        print(f"→ Giá dự đoán: ${price_3:.1f}k")
+    else:
+        example_3 = {'LSTAT': 25.0}
+        price_3 = predict_house_price(best_model, **example_3)
+        print(f"LSTAT: {example_3['LSTAT']} → Giá dự đoán: ${price_3:.1f}k")
+
+def predict_custom():
+    """Cho phép user nhập thông số tùy chỉnh"""
+    print("\n" + "="*60)
+    print("           DỰ ĐOÁN GIÁ NHÀ VỚI THÔNG SỐ TÙY CHỈNH")
+    print("="*60)
+    
+    # Chọn mô hình tốt nhất
+    experiments = [experiment_1, experiment_2, experiment_3]
+    rmse_scores = [final_rmse_1, final_rmse_2, final_rmse_3]
+    best_idx = np.argmin(rmse_scores)
+    best_model = experiments[best_idx]
+    
+    print(f"Sử dụng {best_model.name}")
+    print("Nhập các thông số (Enter để bỏ qua nếu không biết):")
+    
+    user_input = {}
+    
+    if 'LSTAT' in best_model.settings.input_features:
+        lstat = input("LSTAT (% dân số thu nhập thấp, VD: 10.5): ").strip()
+        if lstat:
+            user_input['LSTAT'] = float(lstat)
+    
+    if 'RM' in best_model.settings.input_features:
+        rm = input("RM (Số phòng trung bình, VD: 6.2): ").strip()
+        if rm:
+            user_input['RM'] = float(rm)
+            
+    if 'NOX' in best_model.settings.input_features:
+        nox = input("NOX (Nồng độ NOx, VD: 0.5): ").strip()
+        if nox:
+            user_input['NOX'] = float(nox)
+            
+    if 'DIS' in best_model.settings.input_features:
+        dis = input("DIS (Khoảng cách trung tâm việc làm, VD: 4.0): ").strip()
+        if dis:
+            user_input['DIS'] = float(dis)
+            
+    if 'CRIM' in best_model.settings.input_features:
+        crim = input("CRIM (Tỷ lệ tội phạm, VD: 2.5): ").strip()
+        if crim:
+            user_input['CRIM'] = float(crim)
+    
+    if len(user_input) == len(best_model.settings.input_features):
+        predicted_price = predict_house_price(best_model, **user_input)
+        print(f"\n🏠 Giá nhà dự đoán: ${predicted_price:.1f}k")
+        
+        # Đánh giá
+        if predicted_price > 30:
+            print("   → Khu vực cao cấp! 🏘️")
+        elif predicted_price > 20:
+            print("   → Khu vực trung bình khá 🏠")
+        elif predicted_price > 15:
+            print("   → Khu vực trung bình 🏘️")
+        else:
+            print("   → Khu vực bình dân 🏚️")
+    else:
+        print("⚠️  Cần nhập đầy đủ thông số để dự đoán!")
+
+# Chạy các ví dụ dự đoán
+predict_with_examples()
+
+print("\n" + "="*60)
+print("Bạn có thể gọi predict_custom() để nhập thông số tùy chỉnh")
+print("Hoặc dùng predict_house_price(best_model, LSTAT=10, RM=6, ...)")
+print("="*60)
+, '').replace('k', '')) for x in output_df['ACTUAL_PRICE']]
+    errors = [float(x.replace('
+
+def predict_with_examples():
+    """Dự đoán với các ví dụ cụ thể"""
+    print("\n" + "="*60)
+    print("           DỰ ĐOÁN GIÁ NHÀ VỚI CÁC THÔNG SỐ CỤ THỂ")
+    print("="*60)
+    
+    # Chọn mô hình tốt nhất
+    experiments = [experiment_1, experiment_2, experiment_3]
+    rmse_scores = [final_rmse_1, final_rmse_2, final_rmse_3]
+    best_idx = np.argmin(rmse_scores)
+    best_model = experiments[best_idx]
+    
+    print(f"Sử dụng {best_model.name} (RMSE: {rmse_scores[best_idx]:.3f})")
+    print("\nGiải thích các thông số:")
+    print("- LSTAT: % dân số thu nhập thấp (càng thấp càng tốt)")
+    print("- RM: Số phòng trung bình (càng nhiều càng tốt)")  
+    print("- NOX: Nồng độ NOx (càng thấp càng tốt)")
+    print("- DIS: Khoảng cách đến trung tâm việc làm (càng gần càng tốt)")
+    print("- CRIM: Tỷ lệ tội phạm (càng thấp càng tốt)")
+    
+    # Ví dụ 1: Nhà tốt
+    print("\n--- VÍ DỤ 1: Khu vực tốt ---")
+    if best_model.name != 'Simple Model (1 feature)':
+        example_1 = {
+            'LSTAT': 5.0,    # Thu nhập cao
+            'RM': 7.5,       # Nhiều phòng
+            'NOX': 0.4,      # Ô nhiễm thấp  
+            'DIS': 8.0,      # Gần trung tâm
+            'CRIM': 0.1      # Tỷ lệ tội phạm thấp
+        }
+        price_1 = predict_house_price(best_model, **example_1)
+        print("Thông số:")
+        for k, v in example_1.items():
+            print(f"  {k}: {v}")
+        print(f"→ Giá dự đoán: ${price_1:.1f}k")
+    else:
+        example_1 = {'LSTAT': 5.0}
+        price_1 = predict_house_price(best_model, **example_1)
+        print(f"LSTAT: {example_1['LSTAT']} → Giá dự đoán: ${price_1:.1f}k")
+    
+    # Ví dụ 2: Nhà trung bình
+    print("\n--- VÍ DỤ 2: Khu vực trung bình ---")
+    if best_model.name != 'Simple Model (1 feature)':
+        example_2 = {
+            'LSTAT': 12.0,   # Thu nhập trung bình
+            'RM': 6.0,       # Số phòng trung bình
+            'NOX': 0.55,     # Ô nhiễm trung bình
+            'DIS': 4.0,      # Khoảng cách trung bình
+            'CRIM': 5.0      # Tỷ lệ tội phạm trung bình
+        }
+        price_2 = predict_house_price(best_model, **example_2)
+        print("Thông số:")
+        for k, v in example_2.items():
+            print(f"  {k}: {v}")
+        print(f"→ Giá dự đoán: ${price_2:.1f}k")
+    else:
+        example_2 = {'LSTAT': 12.0}
+        price_2 = predict_house_price(best_model, **example_2)
+        print(f"LSTAT: {example_2['LSTAT']} → Giá dự đoán: ${price_2:.1f}k")
+    
+    # Ví dụ 3: Nhà kém
+    print("\n--- VÍ DỤ 3: Khu vực kém ---")
+    if best_model.name != 'Simple Model (1 feature)':
+        example_3 = {
+            'LSTAT': 25.0,   # Thu nhập thấp
+            'RM': 4.5,       # Ít phòng
+            'NOX': 0.8,      # Ô nhiễm cao
+            'DIS': 1.5,      # Xa trung tâm
+            'CRIM': 20.0     # Tỷ lệ tội phạm cao
+        }
+        price_3 = predict_house_price(best_model, **example_3)
+        print("Thông số:")
+        for k, v in example_3.items():
+            print(f"  {k}: {v}")
+        print(f"→ Giá dự đoán: ${price_3:.1f}k")
+    else:
+        example_3 = {'LSTAT': 25.0}
+        price_3 = predict_house_price(best_model, **example_3)
+        print(f"LSTAT: {example_3['LSTAT']} → Giá dự đoán: ${price_3:.1f}k")
+
+def predict_custom():
+    """Cho phép user nhập thông số tùy chỉnh"""
+    print("\n" + "="*60)
+    print("           DỰ ĐOÁN GIÁ NHÀ VỚI THÔNG SỐ TÙY CHỈNH")
+    print("="*60)
+    
+    # Chọn mô hình tốt nhất
+    experiments = [experiment_1, experiment_2, experiment_3]
+    rmse_scores = [final_rmse_1, final_rmse_2, final_rmse_3]
+    best_idx = np.argmin(rmse_scores)
+    best_model = experiments[best_idx]
+    
+    print(f"Sử dụng {best_model.name}")
+    print("Nhập các thông số (Enter để bỏ qua nếu không biết):")
+    
+    user_input = {}
+    
+    if 'LSTAT' in best_model.settings.input_features:
+        lstat = input("LSTAT (% dân số thu nhập thấp, VD: 10.5): ").strip()
+        if lstat:
+            user_input['LSTAT'] = float(lstat)
+    
+    if 'RM' in best_model.settings.input_features:
+        rm = input("RM (Số phòng trung bình, VD: 6.2): ").strip()
+        if rm:
+            user_input['RM'] = float(rm)
+            
+    if 'NOX' in best_model.settings.input_features:
+        nox = input("NOX (Nồng độ NOx, VD: 0.5): ").strip()
+        if nox:
+            user_input['NOX'] = float(nox)
+            
+    if 'DIS' in best_model.settings.input_features:
+        dis = input("DIS (Khoảng cách trung tâm việc làm, VD: 4.0): ").strip()
+        if dis:
+            user_input['DIS'] = float(dis)
+            
+    if 'CRIM' in best_model.settings.input_features:
+        crim = input("CRIM (Tỷ lệ tội phạm, VD: 2.5): ").strip()
+        if crim:
+            user_input['CRIM'] = float(crim)
+    
+    if len(user_input) == len(best_model.settings.input_features):
+        predicted_price = predict_house_price(best_model, **user_input)
+        print(f"\n🏠 Giá nhà dự đoán: ${predicted_price:.1f}k")
+        
+        # Đánh giá
+        if predicted_price > 30:
+            print("   → Khu vực cao cấp! 🏘️")
+        elif predicted_price > 20:
+            print("   → Khu vực trung bình khá 🏠")
+        elif predicted_price > 15:
+            print("   → Khu vực trung bình 🏘️")
+        else:
+            print("   → Khu vực bình dân 🏚️")
+    else:
+        print("⚠️  Cần nhập đầy đủ thông số để dự đoán!")
+
+# Chạy các ví dụ dự đoán
+predict_with_examples()
+
+print("\n" + "="*60)
+print("Bạn có thể gọi predict_custom() để nhập thông số tùy chỉnh")
+print("Hoặc dùng predict_house_price(best_model, LSTAT=10, RM=6, ...)")
+print("="*60)
+, '').replace('k', '')) for x in output_df['L1_ERROR']]
+    
+    print(f"   • Giá trung bình thực tế: ${np.mean(actual_vals):.2f}k")
+    print(f"   • Giá trung bình dự đoán: ${np.mean(predicted_vals):.2f}k") 
+    print(f"   • Sai số trung bình (MAE): ${np.mean(errors):.2f}k")
+    print(f"   • Sai số lớn nhất: ${np.max(errors):.2f}k")
+    print(f"   • Sai số nhỏ nhất: ${np.min(errors):.2f}k")
+    print("=" * 100)
+
+def predict_single_house(experiment, **feature_values):
+    """
+    Dự đoán giá 1 căn nhà cụ thể
+    
+    Args:
+        experiment: Thí nghiệm đã train
+        **feature_values: Các thông số (VD: LSTAT=10.5, RM=6.2, ...)
+    
+    Returns:
+        float: Giá nhà dự đoán
+    """
+    # Kiểm tra xem các features có trong mô hình không
+    missing_features = set(experiment.settings.input_features) - set(feature_values.keys())
+    if missing_features:
+        raise ValueError(f"Thiếu các features: {missing_features}")
+    
+    # Chuẩn bị input cho model
+    input_data = {}
+    for feature in experiment.settings.input_features:
+        input_data[feature] = np.array([feature_values[feature]])
+    
+    # Dự đoán
+    prediction = experiment.model.predict(input_data, verbose=0)
+    return prediction[0][0]
+
+def demonstrate_predictions():
+    """Demo các chức năng dự đoán mới"""
+    print("\n🎯 DEMO: DỰ ĐOÁN VỚI STYLE MỚI")
+    print("=" * 80)
+    
+    # Chọn mô hình tốt nhất
+    experiments = [experiment_1, experiment_2, experiment_3] 
+    rmse_scores = [
+        experiment_1.metric_history['val_rmse'].iloc[-1] if 'val_rmse' in experiment_1.metric_history else experiment_1.metric_history['rmse'].iloc[-1],
+        experiment_2.metric_history['val_rmse'].iloc[-1] if 'val_rmse' in experiment_2.metric_history else experiment_2.metric_history['rmse'].iloc[-1], 
+        experiment_3.metric_history['val_rmse'].iloc[-1] if 'val_rmse' in experiment_3.metric_history else experiment_3.metric_history['rmse'].iloc[-1]
+    ]
+    best_idx = np.argmin(rmse_scores)
+    best_experiment = experiments[best_idx]
+    
+    print(f"🏆 Sử dụng: {best_experiment.name} (RMSE: {rmse_scores[best_idx]:.3f})")
+    
+    # Demo 1: Dự đoán batch
+    print(f"\n📋 BATCH PREDICTION - Testing {best_experiment.name}")
+    predictions_df = predict_housing_prices(
+        model=best_experiment.model,
+        df=dataset, 
+        features=best_experiment.settings.input_features,
+        label='MEDV',
+        batch_size=15
+    )
+    show_housing_predictions(predictions_df, best_experiment.name)
+    
+    # Demo 2: Dự đoán đơn lẻ
+    print(f"\n🏠 SINGLE HOUSE PREDICTION")
+    print("-" * 50)
+    
+    if len(best_experiment.settings.input_features) > 1:
+        # Multi-feature model
+        example_house = {
+            'LSTAT': 8.5,   # 8.5% dân số thu nhập thấp  
+            'RM': 6.8,      # 6.8 phòng trung bình
+            'NOX': 0.45,    # Nồng độ NOx = 0.45
+            'DIS': 4.2,     # Cách trung tâm 4.2 miles
+            'CRIM': 2.1     # Tỷ lệ tội phạm = 2.1/1000
+        }
+        price = predict_single_house(best_experiment, **example_house)
+        
+        print("🏡 Thông số căn nhà:")
+        for feature, value in example_house.items():
+            formatted_val = format_feature_value(feature, value)
+            print(f"   • {feature}: {formatted_val}")
+        print(f"\n💰 Giá dự đoán: {format_currency(price)}")
+        
+    else:
+        # Single-feature model
+        example_house = {'LSTAT': 12.5}
+        price = predict_single_house(best_experiment, **example_house)
+        print(f"🏡 LSTAT: {format_feature_value('LSTAT', example_house['LSTAT'])}")
+        print(f"💰 Giá dự đoán: {format_currency(price)}")
+    
+    return best_experiment, predictions_df
+
+def predict_with_examples():
+    """Dự đoán với các ví dụ cụ thể"""
+    print("\n" + "="*60)
+    print("           DỰ ĐOÁN GIÁ NHÀ VỚI CÁC THÔNG SỐ CỤ THỂ")
+    print("="*60)
+    
+    # Chọn mô hình tốt nhất
+    experiments = [experiment_1, experiment_2, experiment_3]
+    rmse_scores = [final_rmse_1, final_rmse_2, final_rmse_3]
+    best_idx = np.argmin(rmse_scores)
+    best_model = experiments[best_idx]
+    
+    print(f"Sử dụng {best_model.name} (RMSE: {rmse_scores[best_idx]:.3f})")
+    print("\nGiải thích các thông số:")
+    print("- LSTAT: % dân số thu nhập thấp (càng thấp càng tốt)")
+    print("- RM: Số phòng trung bình (càng nhiều càng tốt)")  
+    print("- NOX: Nồng độ NOx (càng thấp càng tốt)")
+    print("- DIS: Khoảng cách đến trung tâm việc làm (càng gần càng tốt)")
+    print("- CRIM: Tỷ lệ tội phạm (càng thấp càng tốt)")
+    
+    # Ví dụ 1: Nhà tốt
+    print("\n--- VÍ DỤ 1: Khu vực tốt ---")
+    if best_model.name != 'Simple Model (1 feature)':
+        example_1 = {
+            'LSTAT': 5.0,    # Thu nhập cao
+            'RM': 7.5,       # Nhiều phòng
+            'NOX': 0.4,      # Ô nhiễm thấp  
+            'DIS': 8.0,      # Gần trung tâm
+            'CRIM': 0.1      # Tỷ lệ tội phạm thấp
+        }
+        price_1 = predict_house_price(best_model, **example_1)
+        print("Thông số:")
+        for k, v in example_1.items():
+            print(f"  {k}: {v}")
+        print(f"→ Giá dự đoán: ${price_1:.1f}k")
+    else:
+        example_1 = {'LSTAT': 5.0}
+        price_1 = predict_house_price(best_model, **example_1)
+        print(f"LSTAT: {example_1['LSTAT']} → Giá dự đoán: ${price_1:.1f}k")
+    
+    # Ví dụ 2: Nhà trung bình
+    print("\n--- VÍ DỤ 2: Khu vực trung bình ---")
+    if best_model.name != 'Simple Model (1 feature)':
+        example_2 = {
+            'LSTAT': 12.0,   # Thu nhập trung bình
+            'RM': 6.0,       # Số phòng trung bình
+            'NOX': 0.55,     # Ô nhiễm trung bình
+            'DIS': 4.0,      # Khoảng cách trung bình
+            'CRIM': 5.0      # Tỷ lệ tội phạm trung bình
+        }
+        price_2 = predict_house_price(best_model, **example_2)
+        print("Thông số:")
+        for k, v in example_2.items():
+            print(f"  {k}: {v}")
+        print(f"→ Giá dự đoán: ${price_2:.1f}k")
+    else:
+        example_2 = {'LSTAT': 12.0}
+        price_2 = predict_house_price(best_model, **example_2)
+        print(f"LSTAT: {example_2['LSTAT']} → Giá dự đoán: ${price_2:.1f}k")
+    
+    # Ví dụ 3: Nhà kém
+    print("\n--- VÍ DỤ 3: Khu vực kém ---")
+    if best_model.name != 'Simple Model (1 feature)':
+        example_3 = {
+            'LSTAT': 25.0,   # Thu nhập thấp
+            'RM': 4.5,       # Ít phòng
+            'NOX': 0.8,      # Ô nhiễm cao
+            'DIS': 1.5,      # Xa trung tâm
+            'CRIM': 20.0     # Tỷ lệ tội phạm cao
+        }
+        price_3 = predict_house_price(best_model, **example_3)
+        print("Thông số:")
+        for k, v in example_3.items():
+            print(f"  {k}: {v}")
+        print(f"→ Giá dự đoán: ${price_3:.1f}k")
+    else:
+        example_3 = {'LSTAT': 25.0}
+        price_3 = predict_house_price(best_model, **example_3)
+        print(f"LSTAT: {example_3['LSTAT']} → Giá dự đoán: ${price_3:.1f}k")
+
+def predict_custom():
+    """Cho phép user nhập thông số tùy chỉnh"""
+    print("\n" + "="*60)
+    print("           DỰ ĐOÁN GIÁ NHÀ VỚI THÔNG SỐ TÙY CHỈNH")
+    print("="*60)
+    
+    # Chọn mô hình tốt nhất
+    experiments = [experiment_1, experiment_2, experiment_3]
+    rmse_scores = [final_rmse_1, final_rmse_2, final_rmse_3]
+    best_idx = np.argmin(rmse_scores)
+    best_model = experiments[best_idx]
+    
+    print(f"Sử dụng {best_model.name}")
+    print("Nhập các thông số (Enter để bỏ qua nếu không biết):")
+    
+    user_input = {}
+    
+    if 'LSTAT' in best_model.settings.input_features:
+        lstat = input("LSTAT (% dân số thu nhập thấp, VD: 10.5): ").strip()
+        if lstat:
+            user_input['LSTAT'] = float(lstat)
+    
+    if 'RM' in best_model.settings.input_features:
+        rm = input("RM (Số phòng trung bình, VD: 6.2): ").strip()
+        if rm:
+            user_input['RM'] = float(rm)
+            
+    if 'NOX' in best_model.settings.input_features:
+        nox = input("NOX (Nồng độ NOx, VD: 0.5): ").strip()
+        if nox:
+            user_input['NOX'] = float(nox)
+            
+    if 'DIS' in best_model.settings.input_features:
+        dis = input("DIS (Khoảng cách trung tâm việc làm, VD: 4.0): ").strip()
+        if dis:
+            user_input['DIS'] = float(dis)
+            
+    if 'CRIM' in best_model.settings.input_features:
+        crim = input("CRIM (Tỷ lệ tội phạm, VD: 2.5): ").strip()
+        if crim:
+            user_input['CRIM'] = float(crim)
+    
+    if len(user_input) == len(best_model.settings.input_features):
+        predicted_price = predict_house_price(best_model, **user_input)
+        print(f"\n🏠 Giá nhà dự đoán: ${predicted_price:.1f}k")
+        
+        # Đánh giá
+        if predicted_price > 30:
+            print("   → Khu vực cao cấp! 🏘️")
+        elif predicted_price > 20:
+            print("   → Khu vực trung bình khá 🏠")
+        elif predicted_price > 15:
+            print("   → Khu vực trung bình 🏘️")
+        else:
+            print("   → Khu vực bình dân 🏚️")
+    else:
+        print("⚠️  Cần nhập đầy đủ thông số để dự đoán!")
+
+# Chạy các ví dụ dự đoán
+predict_with_examples()
+
+print("\n" + "="*60)
+print("Bạn có thể gọi predict_custom() để nhập thông số tùy chỉnh")
+print("Hoặc dùng predict_house_price(best_model, LSTAT=10, RM=6, ...)")
+print("="*60)
